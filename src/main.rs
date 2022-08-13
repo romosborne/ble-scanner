@@ -1,17 +1,35 @@
 // See the "macOS permissions note" in README.md before running this on macOS
 // Big Sur or later.
 
-use btleplug::api::Peripheral;
-use btleplug::api::{bleuuid::BleUuid, Central, CentralEvent, Manager as _, ScanFilter};
+use btleplug::api::{Central, CentralEvent, Manager as _, ScanFilter};
 use btleplug::platform::{Adapter, Manager};
+use clap::Parser;
 use futures::stream::StreamExt;
 use paho_mqtt as mqtt;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::error::Error;
+use std::time::Duration;
 
 #[macro_use]
 extern crate log;
 
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(short, long, value_parser)]
+    broker: String,
+
+    #[clap(
+        short,
+        long,
+        help = "mac address filter (comma separated)",
+        value_parser
+    )]
+    filter: Option<String>,
+}
+
+#[derive(Serialize)]
 struct SensorData {
     mac_address: String,
     temperature: f32,
@@ -47,11 +65,6 @@ fn parse_the_stuff(value: Vec<u8>) -> SensorData {
     let battery_level = value[12];
     let counter = value[13];
 
-    println!(
-        "{} - {}, Temp: {}, Hum: {}%, Bv: {}, Blev: {}%",
-        counter, mac, temp, hum, battery_v, battery_level
-    );
-
     SensorData {
         mac_address: mac,
         temperature: temp,
@@ -62,25 +75,71 @@ fn parse_the_stuff(value: Vec<u8>) -> SensorData {
     }
 }
 
-fn publish(sd: SensorData) {
-    info!("Publishing: {} for {}", sd.temperature, sd.mac_address)
+async fn publish(client: &mqtt::AsyncClient, sd: SensorData) -> Result<(), Box<dyn Error>> {
+    info!("Publishing: {} for {}", sd.temperature, sd.mac_address);
+    let json = serde_json::to_string(&sd)?;
+    let topic = format!("home/sensor/mac/{}/info", sd.mac_address);
+    let message = mqtt::Message::new(topic, json, mqtt::QOS_1);
+    client.publish(message).await?;
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
 
+    let args = Args::parse();
+
+    info!("Connecting to broker: {}", args.broker);
+
+    let filters: Option<Vec<String>> = match args.filter {
+        Some(filter_string) => Some(
+            filter_string
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>(),
+        ),
+        None => None,
+    };
+
+    match filters {
+        Some(ref fs) => {
+            info!("You supplied a filter:");
+            for f in fs {
+                info!(" - {}", f);
+            }
+        }
+        None => info!("No filter supplied"),
+    }
+
     let mut counters = HashMap::new();
 
-    let mqtt_client = mqtt::AsyncClient::new("tcp://192.168.1.20:1883").unwrap_or_else(|err| {
+    let mqtt_client = mqtt::AsyncClient::new(args.broker).unwrap_or_else(|err| {
         error!("Error creating the client: {}", err);
         panic!();
     });
 
-    mqtt_client.connect(None).await?;
+    let mqtt_conn_opt = mqtt::ConnectOptionsBuilder::new()
+        .keep_alive_interval(Duration::from_secs(20))
+        .automatic_reconnect(Duration::from_secs(2), Duration::from_secs(500))
+        .finalize();
+
+    mqtt_client.connect(mqtt_conn_opt).await?;
     let message = mqtt::Message::new("test", "Greetings", mqtt::QOS_1);
     mqtt_client.publish(message).await?;
-    mqtt_client.disconnect(None).await?;
+
+    publish(
+        &mqtt_client,
+        SensorData {
+            mac_address: "mac".to_string(),
+            temperature: 12.34,
+            humidity: 69.0,
+            battery_level: 98,
+            battery_voltage: 2.8,
+            counter: 1,
+        },
+    )
+    .await?;
 
     let manager = Manager::new().await?;
 
@@ -100,26 +159,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // receiver blocks, so in a real program, this should be run in its own
     // thread (not task, as this library does not yet use async channels).
     while let Some(event) = events.next().await {
-        if let CentralEvent::ServiceDataAdvertisement { id, service_data } = event {
-            // let p = central.peripheral(&id).await.unwrap();
-            // println!("ServiceDataAdvertisement: {:?}, {:?}", p.address(), service_data);
+        if let CentralEvent::ServiceDataAdvertisement {
+            id: _,
+            service_data,
+        } = event
+        {
             for (key, value) in service_data.into_iter() {
                 let magic = key.as_bytes().windows(2).position(|s| s == [0x18, 0x1A]);
                 if let Some(_) = magic {
                     // parse
                     let sensor_data = parse_the_stuff(value);
 
-                    // check if new
-                    let prev =
-                        counters.insert(sensor_data.mac_address.clone(), sensor_data.counter);
-                    if let Some(x) = prev {
-                        if (sensor_data.counter == x) {
-                            info!("Repeated measurement");
+                    // filter
+                    if let Some(ref fs) = filters {
+                        if !fs.contains(&sensor_data.mac_address) {
+                            info!("Filtering out: {}", &sensor_data.mac_address);
                             continue;
                         }
                     }
 
-                    publish(sensor_data);
+                    // check if new
+                    let prev =
+                        counters.insert(sensor_data.mac_address.clone(), sensor_data.counter);
+                    if let Some(x) = prev {
+                        if sensor_data.counter == x {
+                            info!(
+                                "Skipping repeated measurement for {}",
+                                &sensor_data.mac_address
+                            );
+                            continue;
+                        }
+                    }
+
+                    publish(&mqtt_client, sensor_data).await?;
                 }
             }
         }
