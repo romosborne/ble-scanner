@@ -18,6 +18,11 @@ extern crate log;
 #[derive(Deserialize)]
 struct Config {
     broker: String,
+    sensors: Vec<Sensor>,
+}
+
+#[derive(Deserialize)]
+struct Sensor {
     mac: String,
     name: String,
 }
@@ -103,74 +108,74 @@ async fn publish(client: &mqtt::AsyncClient, sd: SensorData) -> Result<(), Box<d
 }
 
 async fn setup_autodiscovery(
-    filter: &str,
-    name: &str,
+    sensors: &Vec<Sensor>,
     mqtt: &mqtt::AsyncClient,
 ) -> Result<(), Box<dyn Error>> {
-    let ident = filter.replace(":", "");
+    for s in sensors {
+        let ident = s.mac.replace(":", "");
 
-    let device = DeviceDiscoveryPayload {
-        manufacturer: "Nozzytronics".to_string(),
-        name: format!("NozzyEnviro-{}", name),
-        identifiers: ident.to_string(),
-    };
+        let device = DeviceDiscoveryPayload {
+            manufacturer: "Nozzytronics".to_string(),
+            name: format!("NozzyEnviro-{}", s.name),
+            identifiers: ident.to_string(),
+        };
 
-    send(
-        mqtt,
-        SensorDiscoveryPayload {
-            name: format!("{}-temp", name),
-            device_class: "temperature".to_string(),
-            state_topic: format!("home/sensor/mac/{}/info", filter),
-            unit_of_measurement: "°C".to_string(),
-            value_template: "{{value_json.temperature}}".to_string(),
-            unique_id: format!("{}-temp", name),
-            device: device.clone(),
-        },
-    )
-    .await?;
+        send(
+            mqtt,
+            SensorDiscoveryPayload {
+                name: format!("{}-temp", s.name),
+                device_class: "temperature".to_string(),
+                state_topic: format!("home/sensor/mac/{}/info", s.mac),
+                unit_of_measurement: "°C".to_string(),
+                value_template: "{{value_json.temperature}}".to_string(),
+                unique_id: format!("{}-temp", s.name),
+                device: device.clone(),
+            },
+        )
+        .await?;
 
-    send(
-        mqtt,
-        SensorDiscoveryPayload {
-            name: format!("{}-humidity", name),
-            device_class: "humidity".to_string(),
-            state_topic: format!("home/sensor/mac/{}/info", filter),
-            unit_of_measurement: "%".to_string(),
-            value_template: "{{value_json.humidity}}".to_string(),
-            unique_id: format!("{}-humidity", name),
-            device: device.clone(),
-        },
-    )
-    .await?;
+        send(
+            mqtt,
+            SensorDiscoveryPayload {
+                name: format!("{}-humidity", s.name),
+                device_class: "humidity".to_string(),
+                state_topic: format!("home/sensor/mac/{}/info", s.mac),
+                unit_of_measurement: "%".to_string(),
+                value_template: "{{value_json.humidity}}".to_string(),
+                unique_id: format!("{}-humidity", s.name),
+                device: device.clone(),
+            },
+        )
+        .await?;
 
-    send(
-        mqtt,
-        SensorDiscoveryPayload {
-            name: format!("{}-batteryvoltage", name),
-            device_class: "voltage".to_string(),
-            state_topic: format!("home/sensor/mac/{}/info", filter),
-            unit_of_measurement: "V".to_string(),
-            value_template: "{{value_json.battery_voltage}}".to_string(),
-            unique_id: format!("{}-batteryvoltage", name),
-            device: device.clone(),
-        },
-    )
-    .await?;
+        send(
+            mqtt,
+            SensorDiscoveryPayload {
+                name: format!("{}-batteryvoltage", s.name),
+                device_class: "voltage".to_string(),
+                state_topic: format!("home/sensor/mac/{}/info", s.mac),
+                unit_of_measurement: "V".to_string(),
+                value_template: "{{value_json.battery_voltage}}".to_string(),
+                unique_id: format!("{}-batteryvoltage", s.name),
+                device: device.clone(),
+            },
+        )
+        .await?;
 
-    send(
-        mqtt,
-        SensorDiscoveryPayload {
-            name: format!("{}-batterylevel", name),
-            device_class: "battery".to_string(),
-            state_topic: format!("home/sensor/mac/{}/info", filter),
-            unit_of_measurement: "%".to_string(),
-            value_template: "{{value_json.battery_level}}".to_string(),
-            unique_id: format!("{}-batterylevel", name),
-            device: device.clone(),
-        },
-    )
-    .await?;
-
+        send(
+            mqtt,
+            SensorDiscoveryPayload {
+                name: format!("{}-batterylevel", s.name),
+                device_class: "battery".to_string(),
+                state_topic: format!("home/sensor/mac/{}/info", s.mac),
+                unit_of_measurement: "%".to_string(),
+                value_template: "{{value_json.battery_level}}".to_string(),
+                unique_id: format!("{}-batterylevel", s.name),
+                device: device.clone(),
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -195,8 +200,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config: Config = serde_json::from_str(&config_data).expect("Unable to parse config");
 
     info!("Connecting to broker: {}", config.broker);
-    info!("Filtering to mac address: {}", config.mac);
-    info!("Name for Home Assistant: {}", config.name);
+
+    for sensor in &config.sensors {
+        info!("Filtering to mac address: {}", sensor.mac);
+        info!("Name for Home Assistant: {}", sensor.name);
+    }
 
     let mut counters = HashMap::new();
 
@@ -213,7 +221,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     mqtt_client.connect(mqtt_conn_opt).await?;
 
     // Trigger autodiscovery
-    setup_autodiscovery(&config.mac, &config.name, &mqtt_client).await?;
+    setup_autodiscovery(&config.sensors, &mqtt_client).await?;
 
     let manager = Manager::new().await?;
 
@@ -245,7 +253,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let sensor_data = parse_the_stuff(value);
 
                     // filter
-                    if config.mac != sensor_data.mac_address[..] {
+                    let x = config
+                        .sensors
+                        .iter()
+                        .map(|s| s.mac.to_owned())
+                        .collect::<Vec<String>>();
+
+                    if !x.contains(&sensor_data.mac_address) {
                         info!("Filtering out: {}", &sensor_data.mac_address);
                         continue;
                     }
