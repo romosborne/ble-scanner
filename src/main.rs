@@ -20,13 +20,29 @@ struct Args {
     #[clap(short, long, value_parser)]
     broker: String,
 
-    #[clap(
-        short,
-        long,
-        help = "mac address filter (comma separated)",
-        value_parser
-    )]
-    filter: Option<String>,
+    #[clap(short, long, help = "mac address", value_parser)]
+    filter: String,
+
+    #[clap(short, long, value_parser)]
+    name: String,
+}
+
+#[derive(Serialize, Clone)]
+struct DeviceDiscoveryPayload {
+    manufacturer: String,
+    name: String,
+    identifiers: String,
+}
+
+#[derive(Serialize)]
+struct SensorDiscoveryPayload {
+    name: String,
+    device_class: String,
+    state_topic: String,
+    unit_of_measurement: String,
+    value_template: String,
+    unique_id: String,
+    device: DeviceDiscoveryPayload,
 }
 
 #[derive(Serialize)]
@@ -79,9 +95,92 @@ async fn publish(client: &mqtt::AsyncClient, sd: SensorData) -> Result<(), Box<d
     info!("Publishing: {} for {}", sd.temperature, sd.mac_address);
     let json = serde_json::to_string(&sd)?;
     let topic = format!("home/sensor/mac/{}/info", sd.mac_address);
-    let message = mqtt::Message::new(topic, json, mqtt::QOS_1);
+    let message = mqtt::Message::new_retained(topic, json, mqtt::QOS_1);
     client.publish(message).await?;
     Ok(())
+}
+
+async fn setup_autodiscovery(
+    filter: &str,
+    name: &str,
+    mqtt: &mqtt::AsyncClient,
+) -> Result<(), Box<dyn Error>> {
+    let ident = filter.replace(":", "");
+
+    let device = DeviceDiscoveryPayload {
+        manufacturer: "Nozzytronics".to_string(),
+        name: format!("NozzyEnviro-{}", name),
+        identifiers: ident.to_string(),
+    };
+
+    send(
+        mqtt,
+        SensorDiscoveryPayload {
+            name: format!("{}-temp", name),
+            device_class: "temperature".to_string(),
+            state_topic: format!("home/sensor/mac/{}/info", filter),
+            unit_of_measurement: "°C".to_string(),
+            value_template: "{{value_json.temperature}}".to_string(),
+            unique_id: format!("{}-temp", name),
+            device: device.clone(),
+        },
+    )
+    .await?;
+
+    send(
+        mqtt,
+        SensorDiscoveryPayload {
+            name: format!("{}-humidity", name),
+            device_class: "humidity".to_string(),
+            state_topic: format!("home/sensor/mac/{}/info", filter),
+            unit_of_measurement: "%".to_string(),
+            value_template: "{{value_json.humidity}}".to_string(),
+            unique_id: format!("{}-humidity", name),
+            device: device.clone(),
+        },
+    )
+    .await?;
+
+    send(
+        mqtt,
+        SensorDiscoveryPayload {
+            name: format!("{}-batteryvoltage", name),
+            device_class: "voltage".to_string(),
+            state_topic: format!("home/sensor/mac/{}/info", filter),
+            unit_of_measurement: "V".to_string(),
+            value_template: "{{value_json.battery_voltage}}".to_string(),
+            unique_id: format!("{}-batteryvoltage", name),
+            device: device.clone(),
+        },
+    )
+    .await?;
+
+    send(
+        mqtt,
+        SensorDiscoveryPayload {
+            name: format!("{}-batterylevel", name),
+            device_class: "battery".to_string(),
+            state_topic: format!("home/sensor/mac/{}/info", filter),
+            unit_of_measurement: "%".to_string(),
+            value_template: "{{value_json.battery_level}}".to_string(),
+            unique_id: format!("{}-batterylevel", name),
+            device: device.clone(),
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn send(
+    mqtt: &mqtt::AsyncClient,
+    payload: SensorDiscoveryPayload,
+) -> Result<(), Box<dyn Error>> {
+    let topic = format!("homeassistant/sensor/{}/config", payload.unique_id);
+    let json = serde_json::to_string(&payload)?;
+
+    let message = mqtt::Message::new(topic, json, mqtt::QOS_1);
+    Ok(mqtt.publish(message).await?)
 }
 
 #[tokio::main]
@@ -91,26 +190,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     info!("Connecting to broker: {}", args.broker);
-
-    let filters: Option<Vec<String>> = match args.filter {
-        Some(filter_string) => Some(
-            filter_string
-                .split(',')
-                .map(|s| s.to_string())
-                .collect::<Vec<String>>(),
-        ),
-        None => None,
-    };
-
-    match filters {
-        Some(ref fs) => {
-            info!("You supplied a filter:");
-            for f in fs {
-                info!(" - {}", f);
-            }
-        }
-        None => info!("No filter supplied"),
-    }
+    info!("Filtering to mac address: {}", args.filter);
+    info!("Name for Home Assistant: {}", args.name);
 
     let mut counters = HashMap::new();
 
@@ -125,8 +206,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .finalize();
 
     mqtt_client.connect(mqtt_conn_opt).await?;
-    // let message = mqtt::Message::new("test", "Greetings", mqtt::QOS_1);
-    // mqtt_client.publish(message).await?;
+
+    // Trigger autodiscovery
+    setup_autodiscovery(&args.filter, &args.name, &mqtt_client).await?;
 
     let manager = Manager::new().await?;
 
@@ -158,11 +240,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let sensor_data = parse_the_stuff(value);
 
                     // filter
-                    if let Some(ref fs) = filters {
-                        if !fs.contains(&sensor_data.mac_address) {
-                            info!("Filtering out: {}", &sensor_data.mac_address);
-                            continue;
-                        }
+                    if args.filter != sensor_data.mac_address[..] {
+                        info!("Filtering out: {}", &sensor_data.mac_address);
+                        continue;
                     }
 
                     // check if new
