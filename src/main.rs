@@ -125,21 +125,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .finalize();
 
     mqtt_client.connect(mqtt_conn_opt).await?;
-    let message = mqtt::Message::new("test", "Greetings", mqtt::QOS_1);
-    mqtt_client.publish(message).await?;
-
-    publish(
-        &mqtt_client,
-        SensorData {
-            mac_address: "mac".to_string(),
-            temperature: 12.34,
-            humidity: 69.0,
-            battery_level: 98,
-            battery_voltage: 2.8,
-            counter: 1,
-        },
-    )
-    .await?;
+    // let message = mqtt::Message::new("test", "Greetings", mqtt::QOS_1);
+    // mqtt_client.publish(message).await?;
 
     let manager = Manager::new().await?;
 
