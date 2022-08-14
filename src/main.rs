@@ -6,25 +6,27 @@ use btleplug::platform::{Adapter, Manager};
 use clap::Parser;
 use futures::stream::StreamExt;
 use paho_mqtt as mqtt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs;
 use std::time::Duration;
 
 #[macro_use]
 extern crate log;
 
+#[derive(Deserialize)]
+struct Config {
+    broker: String,
+    mac: String,
+    name: String,
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
     #[clap(short, long, value_parser)]
-    broker: String,
-
-    #[clap(short, long, help = "mac address", value_parser)]
-    filter: String,
-
-    #[clap(short, long, value_parser)]
-    name: String,
+    config: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -188,14 +190,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
 
     let args = Args::parse();
+    let config_data = fs::read_to_string(args.config).expect("Unable to read config file");
 
-    info!("Connecting to broker: {}", args.broker);
-    info!("Filtering to mac address: {}", args.filter);
-    info!("Name for Home Assistant: {}", args.name);
+    let config: Config = serde_json::from_str(&config_data).expect("Unable to parse config");
+
+    info!("Connecting to broker: {}", config.broker);
+    info!("Filtering to mac address: {}", config.mac);
+    info!("Name for Home Assistant: {}", config.name);
 
     let mut counters = HashMap::new();
 
-    let mqtt_client = mqtt::AsyncClient::new(args.broker).unwrap_or_else(|err| {
+    let mqtt_client = mqtt::AsyncClient::new(config.broker).unwrap_or_else(|err| {
         error!("Error creating the client: {}", err);
         panic!();
     });
@@ -208,7 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     mqtt_client.connect(mqtt_conn_opt).await?;
 
     // Trigger autodiscovery
-    setup_autodiscovery(&args.filter, &args.name, &mqtt_client).await?;
+    setup_autodiscovery(&config.mac, &config.name, &mqtt_client).await?;
 
     let manager = Manager::new().await?;
 
@@ -240,7 +245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let sensor_data = parse_the_stuff(value);
 
                     // filter
-                    if args.filter != sensor_data.mac_address[..] {
+                    if config.mac != sensor_data.mac_address[..] {
                         info!("Filtering out: {}", &sensor_data.mac_address);
                         continue;
                     }
