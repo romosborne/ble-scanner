@@ -138,7 +138,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-temp", s.name),
-                availability_topic: availability_topic,
+                availability_topic: availability_topic.to_string(),
                 device_class: "temperature".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "°C".to_string(),
@@ -153,7 +153,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-humidity", s.name),
-                availability_topic: availability_topic,
+                availability_topic: availability_topic.to_string(),
                 device_class: "humidity".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "%".to_string(),
@@ -168,7 +168,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-batteryvoltage", s.name),
-                availability_topic: availability_topic,
+                availability_topic: availability_topic.to_string(),
                 device_class: "voltage".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "V".to_string(),
@@ -183,7 +183,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-batterylevel", s.name),
-                availability_topic: availability_topic,
+                availability_topic: availability_topic.to_string(),
                 device_class: "battery".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "%".to_string(),
@@ -238,7 +238,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .keep_alive_interval(Duration::from_secs(20))
         .automatic_reconnect(Duration::from_secs(2), Duration::from_secs(500))
         .will_message(mqtt::Message::new(
-            availability_topic,
+            &availability_topic,
             "offline",
             mqtt::QOS_1,
         ))
