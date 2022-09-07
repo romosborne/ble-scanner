@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::time::Duration;
+use uuid::Uuid;
 
 #[macro_use]
 extern crate log;
@@ -44,6 +45,7 @@ struct DeviceDiscoveryPayload {
 #[derive(Serialize)]
 struct SensorDiscoveryPayload {
     name: String,
+    availability_topic: String,
     device_class: String,
     state_topic: String,
     unit_of_measurement: String,
@@ -98,8 +100,19 @@ fn parse_the_stuff(value: Vec<u8>) -> SensorData {
     }
 }
 
-async fn publish(client: &mqtt::AsyncClient, sd: SensorData) -> Result<(), Box<dyn Error>> {
+async fn publish(
+    client: &mqtt::AsyncClient,
+    availability_topic: &String,
+    sd: SensorData,
+) -> Result<(), Box<dyn Error>> {
     info!("Publishing: {} for {}", sd.temperature, sd.mac_address);
+
+    client.publish(mqtt::Message::new(
+        availability_topic,
+        "online",
+        mqtt::QOS_1,
+    ));
+
     let json = serde_json::to_string(&sd)?;
     let topic = format!("home/sensor/mac/{}/info", sd.mac_address);
     let message = mqtt::Message::new_retained(topic, json, mqtt::QOS_1);
@@ -109,6 +122,7 @@ async fn publish(client: &mqtt::AsyncClient, sd: SensorData) -> Result<(), Box<d
 
 async fn setup_autodiscovery(
     sensors: &Vec<Sensor>,
+    availability_topic: &String,
     mqtt: &mqtt::AsyncClient,
 ) -> Result<(), Box<dyn Error>> {
     for s in sensors {
@@ -124,6 +138,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-temp", s.name),
+                availability_topic: availability_topic,
                 device_class: "temperature".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "°C".to_string(),
@@ -138,6 +153,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-humidity", s.name),
+                availability_topic: availability_topic,
                 device_class: "humidity".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "%".to_string(),
@@ -152,6 +168,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-batteryvoltage", s.name),
+                availability_topic: availability_topic,
                 device_class: "voltage".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "V".to_string(),
@@ -166,6 +183,7 @@ async fn setup_autodiscovery(
             mqtt,
             SensorDiscoveryPayload {
                 name: format!("{}-batterylevel", s.name),
+                availability_topic: availability_topic,
                 device_class: "battery".to_string(),
                 state_topic: format!("home/sensor/mac/{}/info", s.mac),
                 unit_of_measurement: "%".to_string(),
@@ -199,6 +217,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let config: Config = serde_json::from_str(&config_data).expect("Unable to parse config");
 
+    let uuid = Uuid::new_v4();
+    let availability_topic = format!("home/sensor/uuid/{}/availability", uuid);
+
     info!("Connecting to broker: {}", config.broker);
 
     for sensor in &config.sensors {
@@ -216,12 +237,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mqtt_conn_opt = mqtt::ConnectOptionsBuilder::new()
         .keep_alive_interval(Duration::from_secs(20))
         .automatic_reconnect(Duration::from_secs(2), Duration::from_secs(500))
+        .will_message(mqtt::Message::new(
+            availability_topic,
+            "offline",
+            mqtt::QOS_1,
+        ))
         .finalize();
 
     mqtt_client.connect(mqtt_conn_opt).await?;
 
     // Trigger autodiscovery
-    setup_autodiscovery(&config.sensors, &mqtt_client).await?;
+    setup_autodiscovery(&config.sensors, &availability_topic, &mqtt_client).await?;
 
     let manager = Manager::new().await?;
 
@@ -277,7 +303,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
 
-                    publish(&mqtt_client, sensor_data).await?;
+                    publish(&mqtt_client, &availability_topic, sensor_data).await?;
                 }
             }
         }
