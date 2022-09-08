@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::time::Duration;
-use uuid::Uuid;
 
 #[macro_use]
 extern crate log;
@@ -19,6 +18,7 @@ extern crate log;
 #[derive(Deserialize)]
 struct Config {
     broker: String,
+    node_id: String,
     sensors: Vec<Sensor>,
 }
 
@@ -217,8 +217,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let config: Config = serde_json::from_str(&config_data).expect("Unable to parse config");
 
-    let uuid = Uuid::new_v4();
-    let availability_topic = format!("home/sensor/uuid/{}/availability", uuid);
+    let availability_topic = format!("home/sensor/uuid/{}/availability", config.node_id);
 
     info!("Connecting to broker: {}", config.broker);
 
