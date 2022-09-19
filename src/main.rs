@@ -104,6 +104,8 @@ async fn publish(
     client: &mqtt::AsyncClient,
     availability_topic: &String,
     sd: SensorData,
+    sensors: &Vec<Sensor>,
+    counter: i32,
 ) -> Result<(), Box<dyn Error>> {
     info!("Publishing: {} for {}", sd.temperature, sd.mac_address);
 
@@ -112,6 +114,10 @@ async fn publish(
         "online",
         mqtt::QOS_1,
     ));
+
+    if counter == 0 {
+        setup_autodiscovery(sensors, availability_topic, client).await?;
+    }
 
     let json = serde_json::to_string(&sd)?;
     let topic = format!("home/sensor/mac/{}/info", sd.mac_address);
@@ -245,9 +251,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     mqtt_client.connect(mqtt_conn_opt).await?;
 
-    // Trigger autodiscovery
-    setup_autodiscovery(&config.sensors, &availability_topic, &mqtt_client).await?;
-
     let manager = Manager::new().await?;
 
     // get the first bluetooth adapter
@@ -261,6 +264,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // start scanning for devices
     central.start_scan(ScanFilter::default()).await?;
+
+    let mut counter = 0;
 
     // Print based on whatever the event receiver outputs. Note that the event
     // receiver blocks, so in a real program, this should be run in its own
@@ -302,7 +307,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
 
-                    publish(&mqtt_client, &availability_topic, sensor_data).await?;
+                    publish(
+                        &mqtt_client,
+                        &availability_topic,
+                        sensor_data,
+                        &config.sensors,
+                        counter,
+                    )
+                    .await?;
+
+                    counter += 1;
+                    if counter >= 10 {
+                        counter = 0;
+                    }
                 }
             }
         }
